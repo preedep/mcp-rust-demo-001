@@ -1,0 +1,31 @@
+# ROLLBACK ONLY — the previous static-key policy, superseded by
+# k8s/securitypolicy.yaml (Entra JWT). Apply this file to switch back; it uses the
+# same resource name, so applying either one replaces the other.
+#
+# Requires an API key on every request through the gateway. Attaches to the
+# HTTPRoute, so the app itself stays unauthenticated and unchanged — the gateway
+# rejects anything without a valid key before it reaches the pod.
+#
+# Foundry's "Key-based" auth sends the credential as: Authorization: <key>
+#
+# The key lives in the Secret below, created from .env by scripts/apply-auth.sh.
+# It is never committed.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: mcp-rust-demo-auth
+  namespace: envoy-gateway
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: mcp-rust-demo
+  apiKeyAuth:
+    credentialRefs:
+      - group: ""
+        kind: Secret
+        name: mcp-rust-demo-apikey
+      # The Secret maps client-id -> api-key, not the reverse.
+    extractFrom:
+      - headers:
+          - Authorization

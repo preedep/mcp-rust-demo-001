@@ -132,6 +132,16 @@ kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/httproute.yaml
 
+# Auth is applied separately: the SecurityPolicy needs a Secret built from the key in
+# .env, which is not a plain `kubectl apply`. Without it the endpoint is wide open, and
+# nothing else would say so — hence the explicit check rather than a silent skip.
+if kubectl -n "$GATEWAY_NS" get securitypolicy mcp-rust-demo-auth >/dev/null 2>&1; then
+    printf '    auth policy present\n'
+else
+    printf '    %sno auth policy — the endpoint is UNAUTHENTICATED%s\n' "${RED:-}" "${RST:-}"
+    printf '    run: kubectl apply -f k8s/securitypolicy.yaml\n'
+fi
+
 # Pin the running container to the tag just deployed, in case the manifest default
 # differs from --tag.
 kubectl -n "$NAMESPACE" set image "deploy/$DEPLOYMENT" "$DEPLOYMENT=$REF" >/dev/null
@@ -161,12 +171,16 @@ fi
 printf '    accepted, backend resolved\n'
 
 step "verifying through the gateway"
-# The gateway enforces an API key (see scripts/apply-auth.sh); read it from .env so
-# the secret is never baked into the repo.
+# The gateway enforces Entra tokens, so fetch one to verify with. MCP_AUTH_MODE=key
+# falls back to the static key for when the rollback policy is live.
 ENV_FILE=${ENV_FILE:-.env}
-API_KEY=${MCP_API_KEY:-}
-if [ -z "$API_KEY" ] && [ -f "$ENV_FILE" ]; then
-    API_KEY=$(grep -E '^MCP_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+if [ "${MCP_AUTH_MODE:-jwt}" = key ]; then
+    API_KEY=${MCP_API_KEY:-}
+    if [ -z "$API_KEY" ] && [ -f "$ENV_FILE" ]; then
+        API_KEY=$(grep -E '^MCP_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+    fi
+else
+    API_KEY="Bearer $(scripts/get-token.sh)"
 fi
 # Envoy can still be draining the old endpoint for a moment after the rollout
 # reports complete, so a single probe here is flaky. Retry briefly.
@@ -186,7 +200,7 @@ if printf '%s' "$RESP" | grep -q '"protocolVersion"'; then
     printf '    handshake ok\n'
 else
     printf '%s\n' "$RESP" >&2
-    [ -n "$API_KEY" ] || printf 'no API key found in %s — the gateway requires one\n' "$ENV_FILE" >&2
+    printf 'the gateway requires a credential; check scripts/get-token.sh --check\n' >&2
     die "gateway did not return a valid initialize response"
 fi
 
@@ -194,4 +208,4 @@ printf '\n%s deployed.\n' "$REF"
 printf '  endpoint   %s\n' "$PUBLIC_URL"
 printf '  in-cluster http://%s.%s.svc.cluster.local:8080/mcp\n' "$DEPLOYMENT" "$NAMESPACE"
 printf '  logs       kubectl -n %s logs -f deploy/%s\n' "$NAMESPACE" "$DEPLOYMENT"
-printf '\nAuth: API key required — scripts/apply-auth.sh --show\n'
+printf '\nAuth: Entra token required — scripts/get-token.sh --check\n'

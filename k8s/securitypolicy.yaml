@@ -1,27 +1,63 @@
-# Requires an API key on every request through the gateway. Attaches to the
-# HTTPRoute, so the app itself stays unauthenticated and unchanged — the gateway
-# rejects anything without a valid key before it reaches the pod.
+# The live auth policy: Entra workload identity. Callers present a bearer token;
+# the gateway validates it against the tenant's JWKS and passes the caller's
+# identity down as plain headers.
 #
-# Foundry's "Key-based" auth sends the credential as: Authorization: <key>
+# k8s/securitypolicy-apikey.yaml is the previous static-key policy, kept as a
+# rollback: apply it to switch back in a few seconds.
 #
-# The key lives in the Secret below, created from .env by scripts/apply-auth.sh.
-# It is never committed.
+# The switch is HARD, not gradual. Declaring apiKeyAuth and jwt on the same policy
+# is accepted by the CRD and reports Accepted=True, but at runtime every request
+# is rejected, including keys that worked a moment earlier (verified 2026-09-12:
+# key-only 200, jwt-only 200, both together 401).
+#
+# Prerequisites in Entra (tenant 4394411e-9ca7-49ab-8e97-ef704b040a23):
+#   - API registration mcp-rust-demo-api  (client id 1384f9e7-…)
+#   - An APP ROLE named mcp.invoke with allowed member type "Applications".
+#     A delegated scope is NOT enough: a client-credentials token carries a
+#     `roles` claim, never `scp`, so a scope-only setup rejects every call.
+#   - Each caller registered separately, granted that app role, with admin consent.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: SecurityPolicy
 metadata:
-  name: mcp-rust-demo-apikey
+  name: mcp-rust-demo-auth
   namespace: envoy-gateway
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
       name: mcp-rust-demo
-  apiKeyAuth:
-    credentialRefs:
-      - group: ""
-        kind: Secret
-        name: mcp-rust-demo-apikey
-      # The Secret maps client-id -> api-key, not the reverse.
-    extractFrom:
-      - headers:
-          - Authorization
+  jwt:
+    providers:
+      - name: entra
+        # v1 issuer, confirmed against a real client-credentials token on
+        # 2026-09-12 (scripts/get-token.sh --check). The API registration has no
+        # `accessTokenAcceptedVersion: 2` in its manifest, so Entra mints v1
+        # tokens carrying sts.windows.net — not the v2.0 login.microsoftonline.com
+        # issuer the docs lead you to. A mismatch here fails as a bare 401 with
+        # nothing to explain it, so re-check `iss` if the manifest ever changes.
+        issuer: https://sts.windows.net/4394411e-9ca7-49ab-8e97-ef704b040a23/
+        audiences:
+          - api://1384f9e7-db22-435d-bcc6-a869dd4acd7d
+        remoteJWKS:
+          # v1 keys endpoint, to match the v1 issuer above.
+          uri: https://login.microsoftonline.com/4394411e-9ca7-49ab-8e97-ef704b040a23/discovery/keys
+        # The server never parses the token: Envoy verifies it and passes the
+        # caller's identity down as plain headers, so the Policy port keeps the
+        # same shape it has under API-key auth.
+        claimToHeaders:
+          - claim: appid       # calling application's client id
+            header: X-Client-Id
+          - claim: oid         # service principal object id — stable per caller
+            header: X-Caller-Oid
+  authorization:
+    defaultAction: Deny
+    rules:
+      - name: require-mcp-invoke
+        action: Allow
+        principal:
+          jwt:
+            provider: entra
+            claims:
+              - name: roles
+                valueType: StringArray
+                values: ["mcp.invoke"]
