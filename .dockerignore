@@ -1,0 +1,11 @@
+# Keep the build context to what the image actually needs: Cargo manifests and src/.
+target
+.git
+.gitignore
+.claude
+scripts
+Dockerfile
+.dockerignore
+
+# Local-only agent context; README is excluded too since the image does not serve docs.
+*.md

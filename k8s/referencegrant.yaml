@@ -1,0 +1,15 @@
+# Without this the HTTPRoute in envoy-gateway cannot target a Service here, and
+# the route reports RefNotPermitted.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-envoy-gateway
+  namespace: mcp-rust-demo
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: envoy-gateway
+  to:
+    - group: ""
+      kind: Service
