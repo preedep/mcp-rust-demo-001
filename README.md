@@ -225,6 +225,117 @@ After each tool call, state which tool you used and show the raw result. If a to
 returns an error, report the server's message verbatim.
 ```
 
+## Per-tool access control (design sketch)
+
+**Not implemented.** This records where per-tool authorisation would go, and — as
+importantly — what the protocol does and does not make possible.
+
+### What each layer can decide
+
+```mermaid
+flowchart TD
+    A[Agent] -->|POST /mcp-rust-demo<br/>Authorization: key| B[Envoy Gateway]
+
+    B --> C{Valid API key?}
+    C -->|no| D[401]
+    C -->|yes| E[Forward + X-Client-Id]
+
+    E --> F[MCP server]
+    F --> G{Which method?}
+    G -->|tools/list| H[Return only tools<br/>this client may call]
+    G -->|tools/call| I{Client allowed<br/>this tool?}
+
+    I -->|no| J["JSON-RPC error -32601<br/>(indistinguishable from<br/>'no such tool')"]
+    I -->|yes| K[Invoke tool]
+    K --> L[Result]
+
+    style B fill:#e8eaf6,color:#000
+    style F fill:#e0f2f1,color:#000
+    style D fill:#ffebee,color:#000
+    style J fill:#ffebee,color:#000
+```
+
+The gateway sees only `POST /mcp-rust-demo`. Every `tools/call` is that same URL with a
+different JSON body, so **the gateway cannot make per-tool decisions** — it answers "may
+this caller in?", never "may this caller run `delete_dag`?". Per-tool authorisation has to
+live in the server, the only component that knows which tool was named.
+
+Envoy's `apiKeyAuth` has a `forwardClientIDHeader` field, so the client id matched against
+the Secret can be passed downstream. That is what gives the server a caller identity to
+authorise against, without it having to verify credentials itself.
+
+### Where it fits in the layers
+
+```mermaid
+flowchart LR
+    subgraph infra["infrastructure"]
+        H[mcp_handler]
+        P[(policy source<br/>ConfigMap / env)]
+        PA[PolicyAdapter]
+    end
+
+    subgraph app["application"]
+        S[McpService]
+        PP[/"Policy port"/]
+    end
+
+    subgraph dom["domain"]
+        T[Tool trait]
+        D[DomainError]
+    end
+
+    H -->|client id + tool name| S
+    S --> PP
+    PA -.implements.-> PP
+    PA --> P
+    S --> T
+
+    style dom fill:#e0f2f1,color:#000
+    style app fill:#fff8e1,color:#000
+    style infra fill:#e8eaf6,color:#000
+```
+
+`Policy` becomes a third outbound port beside `SessionStore` and `ToolRegistry`. The rule
+source stays swappable — a static table today, a ConfigMap or an external service later —
+without `application` or `domain` changing. Enforcement sits in `McpService::call_tool`, the
+single chokepoint every tool invocation already passes through, and `list_tools` filters by
+the same policy so a caller is never shown a tool it cannot use.
+
+### Deny vs. require-approval
+
+These are different things, and only one is a server concern:
+
+| | Deny | Require approval |
+|---|---|---|
+| Effect | Tool never runs | Tool pauses for a human decision |
+| Decided by | **The server** | **The client** |
+| Mechanism | Filter from `tools/list`; error on `tools/call` | Client's own approval UI |
+
+**MCP has no protocol-level approval flow.** A server cannot tell a client "run this only
+after a human agrees". Approval is configured in the client — Claude Code and Claude Desktop
+prompt per call, and Foundry has a require-approval setting on MCP tools. Do not try to build
+it server-side; there is nowhere to put it in the protocol.
+
+What a server *can* do is declare risk, via MCP tool annotations:
+
+| Annotation | Means |
+|---|---|
+| `readOnlyHint` | Does not modify anything |
+| `destructiveHint` | May delete or overwrite |
+| `idempotentHint` | Safe to repeat |
+
+These are **hints, not enforcement** — a client is free to ignore them. `ToolDescriptor` has
+no annotations field today; adding one would be the smallest useful step, since it lets any
+client gate on risk without this server changing again.
+
+### Honest caveat
+
+Per-tool RBAC only means something when the key identifies a *real* caller. There is one key
+and one client here, so a policy table would have exactly one subject — the pattern without
+the benefit. This becomes worth building when there are several callers at different trust
+levels, or a tool that can destroy something. The three demo tools are pure functions over
+their arguments and touch nothing.
+
 ## Architecture
 
 Clean architecture; dependencies point inward only, so the domain has no knowledge of
