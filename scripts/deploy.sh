@@ -132,6 +132,16 @@ kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/httproute.yaml
 
+# Auth is applied separately: the SecurityPolicy needs a Secret built from the key in
+# .env, which is not a plain `kubectl apply`. Without it the endpoint is wide open, and
+# nothing else would say so — hence the explicit check rather than a silent skip.
+if kubectl -n "$GATEWAY_NS" get securitypolicy mcp-rust-demo-apikey >/dev/null 2>&1; then
+    printf '    auth policy present\n'
+else
+    printf '    %sno auth policy — the endpoint is UNAUTHENTICATED%s\n' "${RED:-}" "${RST:-}"
+    printf '    run: scripts/apply-auth.sh\n'
+fi
+
 # Pin the running container to the tag just deployed, in case the manifest default
 # differs from --tag.
 kubectl -n "$NAMESPACE" set image "deploy/$DEPLOYMENT" "$DEPLOYMENT=$REF" >/dev/null

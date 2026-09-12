@@ -166,7 +166,14 @@ exist on the node.
 ```bash
 scripts/deploy.sh --dry-run   # validate manifests, change nothing
 scripts/deploy.sh             # build, import, apply, verify
+scripts/apply-auth.sh         # API-key Secret + SecurityPolicy
 ```
+
+A first-time deploy needs both. `deploy.sh` handles the image and the routing manifests
+(namespace, deployment, service, httproute, referencegrant); `apply-auth.sh` handles the
+SecurityPolicy, which is separate because its Secret is built from the key in `.env` rather
+than applied from a file. `deploy.sh` reports whether the auth policy is present, so a
+deployment left unauthenticated is visible rather than silent. Both are idempotent.
 
 The script builds and smoke tests the image, copies it to the node over ssh, imports it into
 containerd (this needs sudo on the node, so it prompts), applies the manifests, forces a
