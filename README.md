@@ -386,11 +386,11 @@ importantly — what the protocol does and does not make possible.
 
 ```mermaid
 flowchart TD
-    A[Agent] -->|POST /mcp-rust-demo<br/>Authorization: key| B[Envoy Gateway]
+    A[Agent] -->|"POST /mcp-rust-demo<br/>Authorization: Bearer …"| B[Envoy Gateway]
 
-    B --> C{Valid API key?}
-    C -->|no| D[401]
-    C -->|yes| E[Forward + X-Client-Id]
+    B --> C{"Valid token?<br/>+ mcp.invoke role?"}
+    C -->|no| D["401 / 403"]
+    C -->|yes| E["Forward + X-Client-Id"]
 
     E --> F[MCP server]
     F --> G{Which method?}
@@ -494,31 +494,46 @@ their arguments and touch nothing.
 
 ```mermaid
 flowchart LR
-    A[Agent / client]
+    A["Agent / client<br/>(Entra identity)"]
+    E["Microsoft Entra<br/>issues token"]
 
     subgraph edge["public edge"]
-        F[Tailscale Funnel<br/>TLS, :443<br/>scoped to one path]
+        F["Tailscale Funnel<br/>TLS :443<br/>scoped to one path"]
     end
 
     subgraph k3s["k3s on g1pro"]
-        G[Envoy Gateway<br/>HTTPRoute + SecurityPolicy]
-        S[Service<br/>ClusterIP :8080]
-        P[Pod<br/>MCP server]
+        G["Envoy Gateway<br/>HTTPRoute + SecurityPolicy"]
+        S["Service<br/>ClusterIP :8080"]
+        P["Pod<br/>MCP server"]
     end
 
-    A -->|"HTTPS /mcp-rust-demo<br/>Authorization: key"| F
+    A -.->|"1. client credentials"| E
+    E -.->|"token, roles: mcp.invoke"| A
+    A -->|"2. HTTPS /mcp-rust-demo<br/>Authorization: Bearer …"| F
     F -->|"http :30800"| G
-    G -->|"401 if key invalid"| X[rejected]
-    G -->|"URLRewrite<br/>/mcp-rust-demo → /mcp"| S
+
+    G -.->|"fetch JWKS"| E
+    G -->|"401 — bad signature,<br/>issuer or audience"| X1[rejected]
+    G -->|"403 — valid token,<br/>no mcp.invoke role"| X2[rejected]
+    G -->|"URLRewrite /mcp-rust-demo → /mcp<br/>+ X-Client-Id, X-Caller-Oid"| S
+
     S --> P
 
     style edge fill:#e3f2fd,color:#000
     style k3s fill:#e8f5e9,color:#000
-    style X fill:#ffebee,color:#000
+    style E fill:#fff8e1,color:#000
+    style X1 fill:#ffebee,color:#000
+    style X2 fill:#ffebee,color:#000
 ```
 
-Authentication stops at the gateway: the server itself never sees a credential. The rewrite
-means the app always serves `/mcp` and never learns its public path.
+Authentication stops at the gateway: Envoy validates the token against Entra's JWKS and the
+server never sees a credential. It forwards the caller's identity as plain headers
+(`X-Client-Id`, `X-Caller-Oid`), so per-caller logic needs no token parsing in the app.
+
+The two rejection paths are worth telling apart when debugging — **401** means the token
+itself failed (signature, issuer, audience), **403** means it was valid but the principal
+lacks the `mcp.invoke` app role. The URL rewrite means the app always serves `/mcp` and
+never learns its public path.
 
 ### Modules, and which way dependencies point
 
@@ -585,8 +600,8 @@ sequenceDiagram
     participant T as calculate
 
     C->>G: POST /mcp-rust-demo (initialize)
-    G->>G: check API key
-    G->>H: POST /mcp
+    G->>G: verify JWT, check mcp.invoke role
+    G->>H: POST /mcp + X-Client-Id
     H->>S: initialize()
     S-->>H: SessionId
     H-->>C: 200 + Mcp-Session-Id
