@@ -27,6 +27,15 @@ curl -s localhost:8080/mcp \
 Connect a local MCP client by pointing it at `http://localhost:8080/mcp` with transport
 type `http`.
 
+To exercise every method against a running server — local or deployed — use:
+
+```bash
+scripts/smoke-remote.sh http://localhost:8080/mcp
+```
+
+It runs `initialize`, `tools/list`, each tool, `ping`, a deliberate tool failure, and
+`DELETE`, printing each response.
+
 ## Endpoints
 
 | Method | Path | Purpose |
@@ -120,7 +129,7 @@ src/
   application/         use-cases (McpService) + outbound ports (SessionStore, ToolRegistry)
   infrastructure/      actix handlers, JSON-RPC framing, tool impls, in-memory store
 k8s/                   namespace, deployment, service, httproute, referencegrant
-scripts/               build-image.sh, deploy.sh
+scripts/               build-image.sh, deploy.sh, smoke-remote.sh
 ```
 
 Consequences worth knowing before you extend it:
