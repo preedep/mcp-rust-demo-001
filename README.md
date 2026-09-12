@@ -268,5 +268,8 @@ authentication, published over HTTPS via Tailscale Funnel, and verified end to e
 Microsoft Foundry agent.
 
 TLS is terminated by Tailscale (Let's Encrypt); the Gateway listener behind it is plain HTTP.
+The public tunnel is scoped to this service's path alone, so nothing else on the shared
+gateway is reachable from the internet.
+
 The API key is the only access control — there is no rate limiting, key expiry, or per-caller
 audit, so treat this as a demo rather than a pattern to copy for anything touching real data.
