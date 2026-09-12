@@ -16,11 +16,11 @@ set -eu
 
 IMAGE=${IMAGE:-mcp-rust-demo-001}
 TAG=${TAG:-dev}
-SSH_HOST=${SSH_HOST:-nickmsft@nixhome-linux-g1pro}
+SSH_HOST=${SSH_HOST:-}
 NAMESPACE=${NAMESPACE:-mcp-rust-demo}
 DEPLOYMENT=${DEPLOYMENT:-mcp-rust-demo}
 GATEWAY_NS=${GATEWAY_NS:-envoy-gateway}
-PUBLIC_URL=${PUBLIC_URL:-http://nixhome-linux-g1pro:30800/mcp-rust-demo}
+PUBLIC_URL=${PUBLIC_URL:-}
 
 DO_BUILD=1
 DO_IMPORT=1
@@ -46,10 +46,22 @@ CDPATH=''
 export CDPATH
 cd -- "$(dirname -- "$0")/.."
 
+# Host and endpoint come from .env, not from defaults baked into this file: the repo is
+# public and a tailnet hostname is an invitation to probe. See .env.example.
+ENV_FILE=${ENV_FILE:-.env}
+env_get() {
+    [ -f "$ENV_FILE" ] || return 0
+    grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2-
+}
+[ -n "$SSH_HOST" ]   || SSH_HOST=$(env_get SSH_HOST)
+[ -n "$PUBLIC_URL" ] || PUBLIC_URL=$(env_get MCP_URL)
+[ -n "$SSH_HOST" ]   || die "SSH_HOST not set — put it in $ENV_FILE (see .env.example)"
+[ -n "$PUBLIC_URL" ] || die "MCP_URL not set — put it in $ENV_FILE (see .env.example)"
+
 command -v kubectl >/dev/null 2>&1 || die "kubectl not found in PATH"
 # Merge the g1pro kubeconfig the way CLAUDE.md documents, unless the caller set one.
 if [ -z "${KUBECONFIG:-}" ]; then
-    KUBECONFIG="$HOME/.kube/config:$HOME/.kube/nixhome-config"
+    KUBECONFIG="$HOME/.kube/config${KUBECONFIG_EXTRA:+:$KUBECONFIG_EXTRA}"
     export KUBECONFIG
 fi
 
@@ -149,14 +161,32 @@ fi
 printf '    accepted, backend resolved\n'
 
 step "verifying through the gateway"
-RESP=$(curl -s --max-time 10 "$PUBLIC_URL" \
-    -H 'Content-Type: application/json' \
-    -H 'Accept: application/json, text/event-stream' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' 2>/dev/null || true)
+# The gateway enforces an API key (see scripts/apply-auth.sh); read it from .env so
+# the secret is never baked into the repo.
+ENV_FILE=${ENV_FILE:-.env}
+API_KEY=${MCP_API_KEY:-}
+if [ -z "$API_KEY" ] && [ -f "$ENV_FILE" ]; then
+    API_KEY=$(grep -E '^MCP_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+fi
+# Envoy can still be draining the old endpoint for a moment after the rollout
+# reports complete, so a single probe here is flaky. Retry briefly.
+RESP=''
+i=0
+while [ "$i" -lt 10 ]; do
+    RESP=$(curl -s --max-time 10 "$PUBLIC_URL" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        ${API_KEY:+-H "Authorization: $API_KEY"} \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' 2>/dev/null || true)
+    printf '%s' "$RESP" | grep -q '"protocolVersion"' && break
+    i=$((i + 1))
+    sleep 2
+done
 if printf '%s' "$RESP" | grep -q '"protocolVersion"'; then
     printf '    handshake ok\n'
 else
     printf '%s\n' "$RESP" >&2
+    [ -n "$API_KEY" ] || printf 'no API key found in %s — the gateway requires one\n' "$ENV_FILE" >&2
     die "gateway did not return a valid initialize response"
 fi
 
@@ -164,4 +194,4 @@ printf '\n%s deployed.\n' "$REF"
 printf '  endpoint   %s\n' "$PUBLIC_URL"
 printf '  in-cluster http://%s.%s.svc.cluster.local:8080/mcp\n' "$DEPLOYMENT" "$NAMESPACE"
 printf '  logs       kubectl -n %s logs -f deploy/%s\n' "$NAMESPACE" "$DEPLOYMENT"
-printf '\nNote: no TLS and no authentication on this endpoint yet.\n'
+printf '\nAuth: API key required — scripts/apply-auth.sh --show\n'

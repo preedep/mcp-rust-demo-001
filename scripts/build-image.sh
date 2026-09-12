@@ -160,7 +160,8 @@ printf 'To deploy it:  scripts/deploy.sh --skip-build\n'
 # Not a single `docker save | ssh -t ...` pipeline: ssh will not allocate a TTY when
 # stdin is a pipe, and sudo on the node needs one. Stage first, then import.
 printf 'Or by hand, in two steps (the second prompts for sudo on the node):\n'
-printf '  docker save %s | ssh nickmsft@nixhome-linux-g1pro '"'"'cat > /tmp/%s.tar'"'"'\n' \
+# shellcheck disable=SC2016  # prints a literal $SSH_HOST for the reader to substitute
+printf '  docker save %s | ssh $SSH_HOST '"'"'cat > /tmp/%s.tar'"'"'\n' \
     "$REF" "$IMAGE-$TAG"
-printf "  ssh -t nickmsft@nixhome-linux-g1pro 'sudo k3s ctr images import /tmp/%s.tar'\n" \
+printf "  ssh -t \$SSH_HOST 'sudo k3s ctr images import /tmp/%s.tar'\n" \
     "$IMAGE-$TAG"

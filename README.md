@@ -101,6 +101,32 @@ linked, so the image carries nothing else (**2.4 MB**). Note that this means **n
 an ephemeral container. Switch the final stage to `alpine:3.21` (~5.6 MB) if you want a
 shell available.
 
+## Authentication
+
+The gateway requires an API key on the `Authorization` header; the server itself is
+unauthenticated, so the key is enforced entirely at the edge.
+
+```bash
+scripts/apply-auth.sh --generate   # mint a key into .env and apply it
+scripts/apply-auth.sh --show       # print it (to paste into a client)
+scripts/apply-auth.sh --remove     # drop the policy, leaving the route open
+```
+
+The key lives only in `.env`, which is gitignored — copy `.env.example` to start. Scripts
+read `MCP_API_KEY` from there (or the environment); nothing hardcodes it.
+
+```bash
+curl -s -X POST "$URL" -H 'Content-Type: application/json' \
+  -H "Authorization: $(scripts/apply-auth.sh --show)" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+```
+
+Rotate the key at any time — regenerate, apply, and update the client:
+
+```bash
+scripts/apply-auth.sh --generate && scripts/apply-auth.sh --show
+```
+
 ## Deploying to Kubernetes
 
 Manifests are in `k8s/`. The image is imported directly into the node's containerd rather
@@ -125,6 +151,80 @@ binary's real ELF architecture, not just the image label — a builder stage pin
 `$BUILDPLATFORM` produces a host-arch binary inside an image *labelled* for the target, which
 only fails once it reaches the real hardware (`exec format error`).
 
+## Using it from an agent
+
+Point any MCP client at your deployment's endpoint with transport type `http`. The scripts
+read it from `MCP_URL` in `.env`; this repo deliberately does not record a live endpoint. For Microsoft Foundry,
+create a connection with `Key-based` authentication, header `Authorization`, and the value
+from `scripts/apply-auth.sh --show`.
+
+Once connected, these prompts exercise each tool. The agent decides to call a tool from its
+description, so phrasing that implies live server state works best.
+
+**Enumerate what is available**
+
+```
+What tools do you have available?
+```
+
+**Call each tool**
+
+```
+Use the echo tool to send back exactly: hello from Foundry
+```
+
+```
+What time is it right now on the MCP server, in Asia/Bangkok?
+```
+
+The model cannot know this — any answer has to come from the server, which makes it a good
+proof that the tool really ran.
+
+```
+Use the calculate tool to work out (2+3)*4.5, then 100/7, and tell me both results.
+```
+
+**Chain all three in one turn**
+
+```
+Do these three things using the MCP tools, and show each result:
+1. echo the message "MCP demo"
+2. get the server time in Asia/Bangkok
+3. calculate (2+3)*4.5
+```
+
+**Show error handling**
+
+A tool that fails semantically returns `isError: true` with the reason, rather than a
+protocol error, so the model can read it and respond:
+
+```
+Use the calculate tool to compute 1/0. What does the server say?
+```
+
+```
+Get the server time in the timezone "Mars/Olympus".
+```
+
+Expect `cannot evaluate '1/0': division by zero` and `unknown time zone 'Mars/Olympus';
+expected an IANA name such as 'UTC'`.
+
+**Agent instructions**
+
+A default system prompt tends to make the agent *describe* the tools instead of calling
+them. Something like this works better:
+
+```
+You are an assistant with access to MCP tools on a remote server.
+
+When a user asks for the current time, always call get_server_time — never answer
+from your own knowledge, as only the server knows its real clock. For arithmetic,
+use the calculate tool rather than computing it yourself.
+
+After each tool call, state which tool you used and show the raw result. If a tool
+returns an error, report the server's message verbatim.
+```
+
 ## Architecture
 
 Clean architecture; dependencies point inward only, so the domain has no knowledge of
@@ -136,8 +236,8 @@ src/
   domain/              Tool trait, ToolOutput, SessionId, DomainError. No framework, no I/O
   application/         use-cases (McpService) + outbound ports (SessionStore, ToolRegistry)
   infrastructure/      actix handlers, JSON-RPC framing, tool impls, in-memory store
-k8s/                   namespace, deployment, service, httproute, referencegrant
-scripts/               build-image.sh, deploy.sh, smoke-remote.sh
+k8s/                   namespace, deployment, service, httproute, referencegrant, securitypolicy
+scripts/               build-image.sh, deploy.sh, smoke-remote.sh, apply-auth.sh
 ```
 
 Consequences worth knowing before you extend it:
@@ -163,6 +263,10 @@ stateless.
 
 ## Status
 
-The server is implemented, verified locally, and deployed to a k3s cluster behind an Envoy
-Gateway. It has **no TLS and no authentication** — add both before exposing it
-outside a trusted network.
+The server is implemented, deployed to a k3s cluster behind an Envoy Gateway with API-key
+authentication, published over HTTPS via Tailscale Funnel, and verified end to end from a
+Microsoft Foundry agent.
+
+TLS is terminated by Tailscale (Let's Encrypt); the Gateway listener behind it is plain HTTP.
+The API key is the only access control — there is no rate limiting, key expiry, or per-caller
+audit, so treat this as a demo rather than a pattern to copy for anything touching real data.

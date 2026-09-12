@@ -33,7 +33,16 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-URL=${URL:-${URL_DEFAULT:-${MCP_URL:-http://nixhome-linux-g1pro.tail1f1e30.ts.net:30800/mcp-rust-demo}}}
+# No hostname baked in: this repo is public, and a tailnet name is an invitation to
+# probe. Pass a URL, or set MCP_URL in .env (gitignored).
+if [ -z "$URL" ]; then
+    URL=${MCP_URL:-}
+    if [ -z "$URL" ] && [ -f "${ENV_FILE:-.env}" ]; then
+        URL=$(grep -E '^MCP_URL=' "${ENV_FILE:-.env}" | head -1 | cut -d= -f2-)
+    fi
+fi
+[ -n "$URL" ] || die "no URL — pass one, or set MCP_URL in .env (see .env.example)"
+
 
 # Colour only when writing to a terminal and NO_COLOR is unset.
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -46,6 +55,14 @@ fi
 
 CT='Content-Type: application/json'
 ACCEPT='Accept: application/json, text/event-stream'
+
+# The gateway requires an API key. Read it from .env rather than baking it in, so the
+# secret never lands in git. Local runs (cargo run) have no gateway, so it is optional.
+ENV_FILE=${ENV_FILE:-.env}
+API_KEY=${MCP_API_KEY:-}
+if [ -z "$API_KEY" ] && [ -f "$ENV_FILE" ]; then
+    API_KEY=$(grep -E '^MCP_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+fi
 
 pretty() {
     if [ "$PRETTY" -eq 1 ]; then
@@ -64,6 +81,9 @@ show_request() {
     printf '    %s %s\n' "$_method" "$URL"
     printf '    %s\n' "$CT"
     printf '    %s\n' "$ACCEPT"
+    # Show that a key is being sent without printing the secret itself.
+    [ -n "$API_KEY" ] && printf '    Authorization: %s…(from %s)\n' \
+        "$(printf '%s' "$API_KEY" | cut -c1-6)" "$ENV_FILE"
     [ -n "$SID" ] && printf '    Mcp-Session-Id: %s\n' "$SID"
     if [ -n "$_body" ]; then
         printf '    %s\n' "$(printf '%s' "$_body" | pretty | sed '2,$s/^/    /')"
@@ -77,6 +97,7 @@ post() {
     show_request POST "$_body"
     _out=$(curl -s -w '\n%{http_code}' -X POST "$URL" \
         -H "$CT" -H "$ACCEPT" \
+        ${API_KEY:+-H "Authorization: $API_KEY"} \
         ${SID:+-H "Mcp-Session-Id: $SID"} \
         -d "$_body" 2>&1) || { printf '%s    request failed%s\n' "$RED" "$RST"; return 1; }
     _code=$(printf '%s' "$_out" | tail -n1)
@@ -102,7 +123,8 @@ INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVers
 step 'initialize'
 show_request POST "$INIT_BODY"
 if ! INIT_RAW=$(curl -s -S -D "/tmp/smoke-hdr.$$" -X POST "$URL" \
-        -H "$CT" -H "$ACCEPT" -d "$INIT_BODY" 2>&1); then
+        -H "$CT" -H "$ACCEPT" ${API_KEY:+-H "Authorization: $API_KEY"} \
+        -d "$INIT_BODY" 2>&1); then
     rm -f "/tmp/smoke-hdr.$$"
     printf '    %s%s%s\n' "$RED" "$INIT_RAW" "$RST"
     die "could not reach $URL — check the host, port and that the scheme is http"
@@ -112,7 +134,12 @@ SID=$(tr -d '\r' < "/tmp/smoke-hdr.$$" | awk 'tolower($1) == "mcp-session-id:" {
 STATUS=$(awk 'NR==1 {print $2}' "/tmp/smoke-hdr.$$" | tr -d '\r')
 rm -f "/tmp/smoke-hdr.$$"
 status_line "${STATUS:-000}"
-[ -n "$SID" ] || die "no Mcp-Session-Id returned — check the URL and that the server is up"
+if [ -z "$SID" ]; then
+    case ${STATUS:-} in
+        401|403) die "HTTP $STATUS — the gateway rejected the API key. Set MCP_API_KEY in $ENV_FILE (scripts/apply-auth.sh --show)" ;;
+        *)       die "no Mcp-Session-Id returned — check the URL and that the server is up" ;;
+    esac
+fi
 printf '    %ssession: %s%s\n' "$GRN" "$SID" "$RST"
 
 # ---------------------------------------------------------------- the rest
@@ -147,6 +174,7 @@ step 'DELETE session'
     printf '    Mcp-Session-Id: %s\n' "$SID"
     printf '%s  response%s\n' "$DIM" "$RST"
 }
-status_line "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$URL" -H "Mcp-Session-Id: $SID")"
+status_line "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$URL" \
+    ${API_KEY:+-H "Authorization: $API_KEY"} -H "Mcp-Session-Id: $SID")"
 
 printf '\n%sdone%s\n' "$GRN" "$RST"
