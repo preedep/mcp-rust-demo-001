@@ -1,7 +1,11 @@
 # NOT APPLIED — the replacement for securitypolicy.yaml once callers can present a
-# bearer token. Keep the API-key policy live until every caller has migrated; a
-# SecurityPolicy may declare both apiKeyAuth and jwt, so they can run side by side
-# during the cutover.
+# bearer token.
+#
+# This is a HARD cutover, not a gradual one. Declaring apiKeyAuth and jwt on the
+# same policy is accepted by the CRD and reports Accepted=True, but at runtime
+# every request is rejected, including keys that worked a moment earlier (verified
+# 2026-09-12: key-only 200, jwt-only 200, both together 401). Confirm every caller
+# can present a token before applying this.
 #
 # Prerequisites in Entra (tenant 4394411e-9ca7-49ab-8e97-ef704b040a23):
 #   - API registration mcp-rust-demo-api  (client id 1384f9e7-…)

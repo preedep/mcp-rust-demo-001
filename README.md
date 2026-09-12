@@ -143,8 +143,11 @@ Two things to get right:
 - Check the `iss` on a real token before trusting the configured issuer — v1 and v2
   endpoints differ, and a mismatch fails as a bare 401 with nothing to explain it.
 
-A `SecurityPolicy` can declare `apiKeyAuth` and `jwt` together, so both work during a
-cutover; drop the key once nothing depends on it.
+**The switch is all-or-nothing.** A `SecurityPolicy` accepts `apiKeyAuth` and `jwt` as
+sibling fields and reports `Accepted=True` with both set, but at runtime the combination
+rejects everything — including credentials that worked a moment earlier. Verified on
+2026-09-12: key-only works, JWT-only works, both together returns 401 for each. Plan a hard
+cutover, and confirm every caller can present a token first.
 
 Test the token side before switching anything:
 

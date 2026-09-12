@@ -65,11 +65,13 @@ ENV_FILE=${ENV_FILE:-.env}
 AUTH_MODE=${MCP_AUTH_MODE:-key}
 if [ "$AUTH_MODE" = jwt ]; then
     API_KEY="Bearer $(scripts/get-token.sh)"
+    AUTH_SOURCE='Entra token, via scripts/get-token.sh'
 else
     API_KEY=${MCP_API_KEY:-}
     if [ -z "$API_KEY" ] && [ -f "$ENV_FILE" ]; then
         API_KEY=$(grep -E '^MCP_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
     fi
+    AUTH_SOURCE="static API key, from $ENV_FILE"
 fi
 
 pretty() {
@@ -89,9 +91,9 @@ show_request() {
     printf '    %s %s\n' "$_method" "$URL"
     printf '    %s\n' "$CT"
     printf '    %s\n' "$ACCEPT"
-    # Show that a key is being sent without printing the secret itself.
-    [ -n "$API_KEY" ] && printf '    Authorization: %s…(from %s)\n' \
-        "$(printf '%s' "$API_KEY" | cut -c1-6)" "$ENV_FILE"
+    # Show that a credential is being sent, without printing the secret itself.
+    [ -n "$API_KEY" ] && printf '    Authorization: %s…  (%s)\n' \
+        "$(printf '%s' "$API_KEY" | cut -c1-12)" "$AUTH_SOURCE"
     [ -n "$SID" ] && printf '    Mcp-Session-Id: %s\n' "$SID"
     if [ -n "$_body" ]; then
         printf '    %s\n' "$(printf '%s' "$_body" | pretty | sed '2,$s/^/    /')"
@@ -144,7 +146,13 @@ rm -f "/tmp/smoke-hdr.$$"
 status_line "${STATUS:-000}"
 if [ -z "$SID" ]; then
     case ${STATUS:-} in
-        401|403) die "HTTP $STATUS — the gateway rejected the API key. Set MCP_API_KEY in $ENV_FILE (scripts/apply-auth.sh --show)" ;;
+        401|403)
+            if [ "$AUTH_MODE" = jwt ]; then
+                die "HTTP $STATUS — the gateway rejected the token. It enforces one auth method at a time, so check the live SecurityPolicy is the JWT one, and that the token carries the app role (scripts/get-token.sh --check)"
+            else
+                die "HTTP $STATUS — the gateway rejected the API key. Check MCP_API_KEY in $ENV_FILE (scripts/apply-auth.sh --show), and that the live SecurityPolicy is the API-key one"
+            fi
+            ;;
         *)       die "no Mcp-Session-Id returned — check the URL and that the server is up" ;;
     esac
 fi
