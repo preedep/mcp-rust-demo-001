@@ -103,53 +103,10 @@ shell available.
 
 ## Authentication
 
-The gateway requires an API key on the `Authorization` header; the server itself is
-unauthenticated, so the key is enforced entirely at the edge.
-
-```bash
-scripts/apply-auth.sh --generate   # mint a key into .env and apply it
-scripts/apply-auth.sh --show       # print it (to paste into a client)
-scripts/apply-auth.sh --remove     # drop the policy, leaving the route open
-```
-
-The key lives only in `.env`, which is gitignored — copy `.env.example` to start. Scripts
-read `MCP_API_KEY` from there (or the environment); nothing hardcodes it.
-
-```bash
-curl -s -X POST "$URL" -H 'Content-Type: application/json' \
-  -H "Authorization: $(scripts/apply-auth.sh --show)" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
-```
-
-Rotate the key at any time — regenerate, apply, and update the client:
-
-```bash
-scripts/apply-auth.sh --generate && scripts/apply-auth.sh --show
-```
-
-### Moving to workload identity
-
-A static key has no expiry, no revocation and no per-caller identity beyond whoever holds
-it. `k8s/securitypolicy-jwt.yaml` is an unapplied template that replaces it with JWT
-validation against an identity provider: the gateway verifies the token and passes the
-caller's identity down as plain headers, so the server keeps reading a header and does not
-parse tokens itself.
-
-Two things to get right:
-
-- For machine-to-machine callers use an **app role**, not a delegated scope. A
-  client-credentials token carries a `roles` claim and never `scp`, so a scope-only setup
-  rejects every call.
-- Check the `iss` on a real token before trusting the configured issuer — v1 and v2
-  endpoints differ, and a mismatch fails as a bare 401 with nothing to explain it.
-
-**The switch is all-or-nothing.** A `SecurityPolicy` accepts `apiKeyAuth` and `jwt` as
-sibling fields and reports `Accepted=True` with both set, but at runtime the combination
-rejects everything — including credentials that worked a moment earlier. Verified on
-2026-09-12: key-only works, JWT-only works, both together returns 401 for each. Plan a hard
-cutover, and confirm every caller can present a token first.
-
-Test the token side before switching anything:
+The gateway requires an **Entra (Azure AD) access token** on every request; the server
+itself is unauthenticated, so the check happens entirely at the edge. Envoy validates the
+token against the tenant's JWKS and forwards the caller's identity as plain headers
+(`X-Client-Id`, `X-Caller-Oid`), so the server never parses a token.
 
 ```bash
 scripts/get-token.sh --check    # does the token carry the app role?
@@ -157,8 +114,78 @@ scripts/get-token.sh --claims   # full decoded claims
 MCP_AUTH_MODE=jwt scripts/smoke-remote.sh
 ```
 
-`--check` reports `iss`, `aud`, `appid` and `roles`, which is the fastest way to catch the
-two failures above — a missing `roles` claim, or an issuer that does not match the policy.
+Credentials live in `.env`, which is gitignored — copy `.env.example` to start.
+
+### Setting up the app registrations
+
+Two registrations: one identifies the API, one identifies each caller.
+
+**1. The API — `mcp-rust-demo-api`**
+
+| Step | Where | What |
+|---|---|---|
+| Create | App registrations → New | Single tenant is fine |
+| Expose | Expose an API | Set the Application ID URI (defaults to `api://<client-id>`) |
+| **App role** | **App roles** → Create | Value `mcp.invoke`, **Allowed member types: Applications** |
+
+**Use an app role, not a scope.** The "Expose an API → Add a scope" flow creates a
+*delegated* permission, which appears in a token as `scp` and only for user sign-ins. A
+client-credentials token carries `roles` and never `scp`, so a scope-only setup returns a
+token with no `roles` claim and the gateway rejects every call. The portal steers you
+toward the scope, and the failure is silent.
+
+**2. Each caller — e.g. `mcp-rust-demo-client`**
+
+| Step | Where | What |
+|---|---|---|
+| Create | App registrations → New | One per caller, so they can be told apart and revoked separately |
+| Secret | Certificates & secrets | Note the value — it is shown once |
+| Permission | API permissions → Add → My APIs → the API | **Application permissions** → `mcp.invoke` |
+| **Consent** | API permissions | **Grant admin consent** |
+
+**Admin consent is required and easy to miss.** Adding an application permission only
+declares intent; until an admin consents, the Status column reads "Not granted" and the
+role is silently absent from every token.
+
+**3. Fill in `.env`**
+
+```bash
+TENANT_ID=<Directory (tenant) ID from the API registration>
+CLIENT_ID=<Application (client) ID of the *client* registration>
+CLIENT_SECRET=<the secret value>
+API_AUDIENCE=api://<Application (client) ID of the *API* registration>
+```
+
+**4. Verify before touching the cluster**
+
+```bash
+scripts/get-token.sh --check
+```
+
+Expect `roles: ['mcp.invoke']`. If it prints `(none)`, work back through consent → permission
+type → member types. Entra caches tokens for a few minutes after a consent change, so wait
+and retry before assuming it failed.
+
+Note the `iss` that `--check` reports. A registration without `accessTokenAcceptedVersion: 2`
+in its manifest mints **v1** tokens (`https://sts.windows.net/<tenant>/`), not the v2.0
+`login.microsoftonline.com` issuer the docs suggest — and `k8s/securitypolicy.yaml` must
+match exactly, or every call fails as a bare 401 with nothing to explain it.
+
+### Switching back to a static key
+
+`k8s/securitypolicy-apikey.yaml` is the previous key-based policy, kept as a rollback. Both
+files use the same resource name, so applying either replaces the other:
+
+```bash
+kubectl apply -f k8s/securitypolicy-apikey.yaml   # back to the static key
+scripts/apply-auth.sh --show                      # print the key
+```
+
+**The switch is all-or-nothing.** A `SecurityPolicy` accepts `apiKeyAuth` and `jwt` as
+sibling fields and reports `Accepted=True` with both set, but at runtime the combination
+rejects everything — including credentials that worked a moment earlier. Verified on
+2026-09-12: key-only works, JWT-only works, both together returns 401 for each. Confirm
+every caller can present a token before cutting over.
 
 ## Deploying to Kubernetes
 
@@ -510,8 +537,10 @@ src/
   domain/              Tool trait, ToolAnnotations, ToolOutput, SessionId, DomainError
   application/         use-cases (McpService) + outbound ports (SessionStore, ToolRegistry)
   infrastructure/      actix handlers, JSON-RPC framing, tool impls, in-memory store
-k8s/                   namespace, deployment, service, httproute, referencegrant, securitypolicy
-scripts/               build-image.sh, deploy.sh, smoke-remote.sh, apply-auth.sh
+k8s/                   namespace, deployment, service, httproute, referencegrant,
+                       securitypolicy (JWT), securitypolicy-apikey (rollback)
+scripts/               build-image.sh, deploy.sh, smoke-remote.sh, get-token.sh,
+                       apply-auth.sh (rollback)
 ```
 
 Consequences worth knowing before you extend it:
@@ -545,5 +574,11 @@ TLS is terminated by Tailscale (Let's Encrypt); the Gateway listener behind it i
 The public tunnel is scoped to this service's path alone, so nothing else on the shared
 gateway is reachable from the internet.
 
-The API key is the only access control — there is no rate limiting, key expiry, or per-caller
-audit, so treat this as a demo rather than a pattern to copy for anything touching real data.
+Callers authenticate with a short-lived Entra token carrying the `mcp.invoke` app role, so
+there is no shared secret at rest and revocation happens at the identity provider. There is
+still no rate limiting or per-tool authorisation — see the access-control sketch below.
+
+Note that a Microsoft Foundry agent cannot currently reach this endpoint: its MCP connection
+sends a static credential, and the gateway enforces one auth method at a time. Apply
+`k8s/securitypolicy-apikey.yaml` to switch back to the static key if the agent path matters
+more than workload identity.

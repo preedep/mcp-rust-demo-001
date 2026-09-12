@@ -1,4 +1,9 @@
 #!/bin/sh
+# ROLLBACK PATH. The gateway now authenticates with Entra tokens
+# (k8s/securitypolicy.yaml); this script manages the previous static-key policy in
+# k8s/securitypolicy-apikey.yaml. Use it to switch back, or to rotate the key while
+# key auth is live.
+#
 # Create (or rotate) the API key Secret the gateway checks, and apply the
 # SecurityPolicy that enforces it.
 #
@@ -71,7 +76,7 @@ case $ACTION in
         exit 0
         ;;
     remove)
-        kubectl -n "$NAMESPACE" delete securitypolicy mcp-rust-demo-apikey --ignore-not-found
+        kubectl -n "$NAMESPACE" delete securitypolicy mcp-rust-demo-auth --ignore-not-found
         kubectl -n "$NAMESPACE" delete secret "$SECRET" --ignore-not-found
         printf '\nauth removed — the route is now open to anyone who can reach the gateway.\n'
         exit 0
@@ -87,16 +92,16 @@ kubectl -n "$NAMESPACE" create secret generic "$SECRET" \
     --from-literal="$CLIENT=$KEY" \
     --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f k8s/securitypolicy.yaml
+kubectl apply -f k8s/securitypolicy-apikey.yaml
 
 printf '\n==> waiting for the policy to be accepted\n'
 i=0
-until kubectl -n "$NAMESPACE" get securitypolicy mcp-rust-demo-apikey \
+until kubectl -n "$NAMESPACE" get securitypolicy mcp-rust-demo-auth \
         -o jsonpath='{.status.ancestors[0].conditions[?(@.type=="Accepted")].status}' \
         2>/dev/null | grep -q True; do
     i=$((i + 1))
     [ "$i" -lt 30 ] || {
-        kubectl -n "$NAMESPACE" get securitypolicy mcp-rust-demo-apikey -o yaml | sed -n '/^status:/,$p'
+        kubectl -n "$NAMESPACE" get securitypolicy mcp-rust-demo-auth -o yaml | sed -n '/^status:/,$p'
         die "policy was not accepted"
     }
     sleep 1

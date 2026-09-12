@@ -8,7 +8,7 @@
 #
 # Options:
 #   -q, --quiet     responses only, no request echo
-#   MCP_AUTH_MODE=jwt   authenticate with an Entra token instead of the static key
+#   MCP_AUTH_MODE=key   use the static API key instead of an Entra token (rollback)
 #   -r, --raw       do not pretty-print JSON responses
 #   --no-color      plain output (also honoured via NO_COLOR)
 #
@@ -62,7 +62,7 @@ ACCEPT='Accept: application/json, text/event-stream'
 ENV_FILE=${ENV_FILE:-.env}
 # MCP_AUTH_MODE=jwt fetches an Entra token instead of using the static key, so the
 # same script tests either policy.
-AUTH_MODE=${MCP_AUTH_MODE:-key}
+AUTH_MODE=${MCP_AUTH_MODE:-jwt}
 if [ "$AUTH_MODE" = jwt ]; then
     API_KEY="Bearer $(scripts/get-token.sh)"
     AUTH_SOURCE='Entra token, via scripts/get-token.sh'
