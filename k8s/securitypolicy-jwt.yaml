@@ -1,0 +1,52 @@
+# NOT APPLIED — the replacement for securitypolicy.yaml once callers can present a
+# bearer token. Keep the API-key policy live until every caller has migrated; a
+# SecurityPolicy may declare both apiKeyAuth and jwt, so they can run side by side
+# during the cutover.
+#
+# Prerequisites in Entra (tenant 4394411e-9ca7-49ab-8e97-ef704b040a23):
+#   - API registration mcp-rust-demo-api  (client id 1384f9e7-…)
+#   - An APP ROLE named mcp.invoke with allowed member type "Applications".
+#     A delegated scope is NOT enough: a client-credentials token carries a
+#     `roles` claim, never `scp`, so a scope-only setup rejects every call.
+#   - Each caller registered separately, granted that app role, with admin consent.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: mcp-rust-demo-jwt
+  namespace: envoy-gateway
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: mcp-rust-demo
+  jwt:
+    providers:
+      - name: entra
+        # v2.0 issuer. Tokens minted by the v1 endpoint carry
+        # https://sts.windows.net/<tenant>/ instead — check `iss` on a real token
+        # before assuming, since a mismatch fails with a bare 401.
+        issuer: https://login.microsoftonline.com/4394411e-9ca7-49ab-8e97-ef704b040a23/v2.0
+        audiences:
+          - api://1384f9e7-db22-435d-bcc6-a869dd4acd7d
+        remoteJWKS:
+          uri: https://login.microsoftonline.com/4394411e-9ca7-49ab-8e97-ef704b040a23/discovery/v2.0/keys
+        # The server never parses the token: Envoy verifies it and passes the
+        # caller's identity down as plain headers, so the Policy port keeps the
+        # same shape it has under API-key auth.
+        claimToHeaders:
+          - claim: appid       # calling application's client id
+            header: X-Client-Id
+          - claim: oid         # service principal object id — stable per caller
+            header: X-Caller-Oid
+  authorization:
+    defaultAction: Deny
+    rules:
+      - name: require-mcp-invoke
+        action: Allow
+        principal:
+          jwt:
+            provider: entra
+            claims:
+              - name: roles
+                valueType: StringArray
+                values: ["mcp.invoke"]

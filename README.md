@@ -127,6 +127,25 @@ Rotate the key at any time — regenerate, apply, and update the client:
 scripts/apply-auth.sh --generate && scripts/apply-auth.sh --show
 ```
 
+### Moving to workload identity
+
+A static key has no expiry, no revocation and no per-caller identity beyond whoever holds
+it. `k8s/securitypolicy-jwt.yaml` is an unapplied template that replaces it with JWT
+validation against an identity provider: the gateway verifies the token and passes the
+caller's identity down as plain headers, so the server keeps reading a header and does not
+parse tokens itself.
+
+Two things to get right:
+
+- For machine-to-machine callers use an **app role**, not a delegated scope. A
+  client-credentials token carries a `roles` claim and never `scp`, so a scope-only setup
+  rejects every call.
+- Check the `iss` on a real token before trusting the configured issuer — v1 and v2
+  endpoints differ, and a mismatch fails as a bare 401 with nothing to explain it.
+
+A `SecurityPolicy` can declare `apiKeyAuth` and `jwt` together, so both work during a
+cutover; drop the key once nothing depends on it.
+
 ## Deploying to Kubernetes
 
 Manifests are in `k8s/`. The image is imported directly into the node's containerd rather
