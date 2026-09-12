@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::domain::{DomainError, Tool, ToolDescriptor, ToolOutput};
+use crate::domain::{DomainError, Tool, ToolAnnotations, ToolDescriptor, ToolOutput};
 
 pub struct Calculate;
 
@@ -8,9 +8,11 @@ impl Tool for Calculate {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "calculate",
-            description: "Evaluate a basic arithmetic expression and return the numeric \
-                          result. Supports + - * / %, parentheses, unary minus and \
-                          decimals, for example '(2 + 3) * 4.5'.",
+            description: "Evaluate an arithmetic expression on the server and return the \
+                          numeric result. Use this for any calculation rather than working \
+                          it out yourself, so the answer is checked. Supports + - * / %, \
+                          parentheses, unary minus and decimals, for example \
+                          '(2 + 3) * 4.5'. Safe, instant and read-only.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -22,6 +24,7 @@ impl Tool for Calculate {
                 "required": ["expression"],
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::read_only(),
         }
     }
 

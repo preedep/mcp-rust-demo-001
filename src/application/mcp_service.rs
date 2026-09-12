@@ -59,7 +59,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::domain::{Tool, ToolDescriptor};
+    use crate::domain::{Tool, ToolAnnotations, ToolDescriptor};
 
     /// Stub adapters: the use-cases are testable without actix or a real store.
     struct FakeStore;
@@ -82,6 +82,7 @@ mod tests {
                 name: "noop",
                 description: "d",
                 input_schema: json!({}),
+                annotations: ToolAnnotations::read_only(),
             }
         }
         fn invoke(&self, _: &Value) -> Result<ToolOutput, DomainError> {

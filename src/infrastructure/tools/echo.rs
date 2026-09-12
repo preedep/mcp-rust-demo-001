@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::domain::{DomainError, Tool, ToolDescriptor, ToolOutput};
+use crate::domain::{DomainError, Tool, ToolAnnotations, ToolDescriptor, ToolOutput};
 
 pub struct Echo;
 
@@ -8,8 +8,9 @@ impl Tool for Echo {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "echo",
-            description: "Return the supplied message unchanged. Use this to verify that \
-                          the connection to the MCP server is working.",
+            description: "Echo a message back unchanged. Call this to check that the \
+                          connection to the MCP server is working. Safe, instant and \
+                          read-only — there is no reason not to call it.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -18,6 +19,7 @@ impl Tool for Echo {
                 "required": ["message"],
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::read_only(),
         }
     }
 

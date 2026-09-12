@@ -79,10 +79,18 @@ pub fn error_code_for(err: &DomainError) -> i32 {
 }
 
 pub fn tool_descriptor_to_json(d: &ToolDescriptor) -> Value {
+    let a = &d.annotations;
     serde_json::json!({
         "name": d.name,
         "description": d.description,
         "inputSchema": d.input_schema,
+        // Hint names are fixed by the MCP spec; a client matches on them exactly.
+        "annotations": {
+            "readOnlyHint": a.read_only,
+            "destructiveHint": a.destructive,
+            "idempotentHint": a.idempotent,
+            "openWorldHint": a.open_world,
+        },
     })
 }
 

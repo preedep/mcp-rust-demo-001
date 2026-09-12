@@ -4,4 +4,4 @@ pub mod tool;
 
 pub use error::DomainError;
 pub use session::SessionId;
-pub use tool::{Tool, ToolDescriptor, ToolOutput};
+pub use tool::{Tool, ToolAnnotations, ToolDescriptor, ToolOutput};

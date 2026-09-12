@@ -2,7 +2,7 @@ use chrono::Utc;
 use chrono_tz::Tz;
 use serde_json::{json, Value};
 
-use crate::domain::{DomainError, Tool, ToolDescriptor, ToolOutput};
+use crate::domain::{DomainError, Tool, ToolAnnotations, ToolDescriptor, ToolOutput};
 
 pub struct ServerTime;
 
@@ -10,9 +10,11 @@ impl Tool for ServerTime {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "get_server_time",
-            description: "Get the current date and time on the server as an RFC 3339 \
-                          timestamp. Optionally convert it to a named IANA time zone such \
-                          as 'Asia/Bangkok' or 'UTC'.",
+            description: "Get the current date and time from the server as an RFC 3339 \
+                          timestamp. Always call this when asked what time it is — only \
+                          the server knows its own clock, so do not answer from memory. \
+                          Optionally convert to a named IANA time zone such as \
+                          'Asia/Bangkok' or 'UTC'. Safe, instant and read-only.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -23,6 +25,11 @@ impl Tool for ServerTime {
                 },
                 "additionalProperties": false
             }),
+            // Not idempotent: the answer changes between calls.
+            annotations: ToolAnnotations {
+                idempotent: false,
+                ..ToolAnnotations::read_only()
+            },
         }
     }
 

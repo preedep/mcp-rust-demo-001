@@ -338,13 +338,136 @@ their arguments and touch nothing.
 
 ## Architecture
 
-Clean architecture; dependencies point inward only, so the domain has no knowledge of
-actix, HTTP, or JSON-RPC.
+### Request path, edge to tool
+
+```mermaid
+flowchart LR
+    A[Agent / client]
+
+    subgraph edge["public edge"]
+        F[Tailscale Funnel<br/>TLS, :443<br/>scoped to one path]
+    end
+
+    subgraph k3s["k3s on g1pro"]
+        G[Envoy Gateway<br/>HTTPRoute + SecurityPolicy]
+        S[Service<br/>ClusterIP :8080]
+        P[Pod<br/>MCP server]
+    end
+
+    A -->|"HTTPS /mcp-rust-demo<br/>Authorization: key"| F
+    F -->|"http :30800"| G
+    G -->|"401 if key invalid"| X[rejected]
+    G -->|"URLRewrite<br/>/mcp-rust-demo → /mcp"| S
+    S --> P
+
+    style edge fill:#e3f2fd,color:#000
+    style k3s fill:#e8f5e9,color:#000
+    style X fill:#ffebee,color:#000
+```
+
+Authentication stops at the gateway: the server itself never sees a credential. The rewrite
+means the app always serves `/mcp` and never learns its public path.
+
+### Modules, and which way dependencies point
+
+```mermaid
+flowchart TD
+    M[main.rs<br/>composition root]
+
+    subgraph infra["infrastructure — adapters"]
+        H[http::mcp_handler<br/>actix routes]
+        J[http::jsonrpc<br/>envelopes, error codes]
+        R[tools::StaticToolRegistry]
+        T1[echo]
+        T2[server_time]
+        T3[calculate]
+        ST[MemorySessionStore]
+    end
+
+    subgraph app["application — use-cases"]
+        SVC[McpService]
+        PORTS[/"ports:<br/>SessionStore, ToolRegistry"/]
+    end
+
+    subgraph dom["domain — no framework, no I/O"]
+        TR[Tool trait<br/>ToolDescriptor, ToolAnnotations]
+        OUT[ToolOutput]
+        SID[SessionId]
+        ERR[DomainError]
+    end
+
+    M -.wires.-> SVC
+    M -.wires.-> R
+    M -.wires.-> ST
+    M --> H
+
+    H --> J
+    H --> SVC
+    SVC --> PORTS
+    R -.implements.-> PORTS
+    ST -.implements.-> PORTS
+    R --> T1 & T2 & T3
+    T1 & T2 & T3 -.implement.-> TR
+    SVC --> OUT
+    SVC --> ERR
+    H --> SID
+
+    style dom fill:#e0f2f1,color:#000
+    style app fill:#fff8e1,color:#000
+    style infra fill:#e8eaf6,color:#000
+```
+
+Arrows only ever point inward — `infrastructure` → `application` → `domain`. Nothing in
+`domain` or `application` imports `actix_web`; an import like that is the signal that logic
+has leaked outward.
+
+### A tool call, end to end
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as Envoy Gateway
+    participant H as mcp_handler
+    participant S as McpService
+    participant R as ToolRegistry
+    participant T as calculate
+
+    C->>G: POST /mcp-rust-demo (initialize)
+    G->>G: check API key
+    G->>H: POST /mcp
+    H->>S: initialize()
+    S-->>H: SessionId
+    H-->>C: 200 + Mcp-Session-Id
+
+    C->>G: tools/call {name, arguments}
+    G->>H: forward
+    H->>H: parse JSON-RPC envelope
+    H->>S: call_tool(name, args)
+    S->>R: find(name)
+    alt unknown tool
+        R-->>S: Err(UnknownTool)
+        S-->>H: DomainError
+        H-->>C: JSON-RPC error -32601
+    else found
+        R-->>S: &dyn Tool
+        S->>T: invoke(args)
+        T-->>S: ToolOutput{text, is_error}
+        S-->>H: ToolOutput
+        H-->>C: result + isError
+    end
+```
+
+Note the two failure modes are deliberately different. An unknown *method or tool* is a
+protocol fault and returns a JSON-RPC error; a tool that runs and fails — `1/0`, a bad
+timezone — returns a normal result with `isError: true`, so the model can read the reason
+and react instead of seeing a transport failure.
+
+### Layout
 
 ```
 src/
   main.rs              composition root — the only place that wires the layers
-  domain/              Tool trait, ToolOutput, SessionId, DomainError. No framework, no I/O
+  domain/              Tool trait, ToolAnnotations, ToolOutput, SessionId, DomainError
   application/         use-cases (McpService) + outbound ports (SessionStore, ToolRegistry)
   infrastructure/      actix handlers, JSON-RPC framing, tool impls, in-memory store
 k8s/                   namespace, deployment, service, httproute, referencegrant, securitypolicy
