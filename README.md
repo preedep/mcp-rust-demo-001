@@ -176,6 +176,54 @@ match exactly, or every call fails as a bare 401 with nothing to explain it.
 A Foundry agent authenticates with its own **Entra Agent Identity** — a per-agent service
 principal — so no secret is shared with it and each agent can be authorised separately.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant AG as Foundry agent<br/>(Agent Identity)
+    participant EN as Microsoft Entra
+    participant FN as Tailscale Funnel
+    participant GW as Envoy Gateway
+    participant MCP as MCP server
+
+    Note over AG,EN: once per token lifetime, not per call
+    AG->>EN: client credentials for the API audience
+    EN-->>AG: access token<br/>aud, roles: ["mcp.invoke"]
+
+    Note over GW,EN: cached, refreshed periodically
+    GW->>EN: fetch JWKS (signing keys)
+    EN-->>GW: public keys
+
+    U->>AG: "what tools do you have?"
+    AG->>FN: POST /mcp-rust-demo<br/>Authorization: Bearer …
+    FN->>GW: http :30800 (TLS terminated)
+
+    GW->>GW: verify signature, issuer, audience
+    alt token invalid
+        GW-->>AG: 401
+    else valid but no mcp.invoke role
+        GW-->>AG: 403 rbac_access_denied
+    else authorised
+        GW->>MCP: POST /mcp<br/>+ X-Client-Id, X-Caller-Oid
+        MCP-->>GW: initialize result + Mcp-Session-Id
+        GW-->>AG: 200
+
+        AG->>GW: tools/list (Bearer + session id)
+        GW->>MCP: forward
+        MCP-->>AG: echo, get_server_time, calculate
+
+        AG->>GW: tools/call {name, arguments}
+        GW->>MCP: forward
+        MCP-->>AG: result
+        AG-->>U: answer
+    end
+```
+
+The agent holds no secret belonging to this project: Entra mints a short-lived token for its
+own identity, and the gateway trusts it because the signature verifies and the token carries
+the `mcp.invoke` app role. The server sees only `X-Client-Id` and `X-Caller-Oid`, so it never
+parses a token. Granting the role is a one-off per agent (step 3 below).
+
 **1. Configure the connection** (Foundry → the MCP connection → Edit):
 
 | Field | Value |
