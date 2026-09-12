@@ -8,6 +8,7 @@
 #
 # Options:
 #   -q, --quiet     responses only, no request echo
+#   MCP_AUTH_MODE=jwt   authenticate with an Entra token instead of the static key
 #   -r, --raw       do not pretty-print JSON responses
 #   --no-color      plain output (also honoured via NO_COLOR)
 #
@@ -59,9 +60,16 @@ ACCEPT='Accept: application/json, text/event-stream'
 # The gateway requires an API key. Read it from .env rather than baking it in, so the
 # secret never lands in git. Local runs (cargo run) have no gateway, so it is optional.
 ENV_FILE=${ENV_FILE:-.env}
-API_KEY=${MCP_API_KEY:-}
-if [ -z "$API_KEY" ] && [ -f "$ENV_FILE" ]; then
-    API_KEY=$(grep -E '^MCP_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+# MCP_AUTH_MODE=jwt fetches an Entra token instead of using the static key, so the
+# same script tests either policy.
+AUTH_MODE=${MCP_AUTH_MODE:-key}
+if [ "$AUTH_MODE" = jwt ]; then
+    API_KEY="Bearer $(scripts/get-token.sh)"
+else
+    API_KEY=${MCP_API_KEY:-}
+    if [ -z "$API_KEY" ] && [ -f "$ENV_FILE" ]; then
+        API_KEY=$(grep -E '^MCP_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+    fi
 fi
 
 pretty() {

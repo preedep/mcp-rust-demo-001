@@ -22,14 +22,18 @@ spec:
   jwt:
     providers:
       - name: entra
-        # v2.0 issuer. Tokens minted by the v1 endpoint carry
-        # https://sts.windows.net/<tenant>/ instead — check `iss` on a real token
-        # before assuming, since a mismatch fails with a bare 401.
-        issuer: https://login.microsoftonline.com/4394411e-9ca7-49ab-8e97-ef704b040a23/v2.0
+        # v1 issuer, confirmed against a real client-credentials token on
+        # 2026-09-12 (scripts/get-token.sh --check). The API registration has no
+        # `accessTokenAcceptedVersion: 2` in its manifest, so Entra mints v1
+        # tokens carrying sts.windows.net — not the v2.0 login.microsoftonline.com
+        # issuer the docs lead you to. A mismatch here fails as a bare 401 with
+        # nothing to explain it, so re-check `iss` if the manifest ever changes.
+        issuer: https://sts.windows.net/4394411e-9ca7-49ab-8e97-ef704b040a23/
         audiences:
           - api://1384f9e7-db22-435d-bcc6-a869dd4acd7d
         remoteJWKS:
-          uri: https://login.microsoftonline.com/4394411e-9ca7-49ab-8e97-ef704b040a23/discovery/v2.0/keys
+          # v1 keys endpoint, to match the v1 issuer above.
+          uri: https://login.microsoftonline.com/4394411e-9ca7-49ab-8e97-ef704b040a23/discovery/keys
         # The server never parses the token: Envoy verifies it and passes the
         # caller's identity down as plain headers, so the Policy port keeps the
         # same shape it has under API-key auth.

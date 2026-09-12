@@ -146,6 +146,17 @@ Two things to get right:
 A `SecurityPolicy` can declare `apiKeyAuth` and `jwt` together, so both work during a
 cutover; drop the key once nothing depends on it.
 
+Test the token side before switching anything:
+
+```bash
+scripts/get-token.sh --check    # does the token carry the app role?
+scripts/get-token.sh --claims   # full decoded claims
+MCP_AUTH_MODE=jwt scripts/smoke-remote.sh
+```
+
+`--check` reports `iss`, `aud`, `appid` and `roles`, which is the fastest way to catch the
+two failures above — a missing `roles` claim, or an issuer that does not match the policy.
+
 ## Deploying to Kubernetes
 
 Manifests are in `k8s/`. The image is imported directly into the node's containerd rather
