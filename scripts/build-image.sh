@@ -58,6 +58,31 @@ docker buildx build \
 SIZE=$(docker save "$REF" | wc -c | awk '{printf "%.2f MB", $1/1048576}')
 printf '==> image size: %s (docker save)\n' "$SIZE"
 
+# The image metadata can claim one architecture while the binary inside is another
+# (a builder stage pinned to $BUILDPLATFORM does exactly that), and the node then
+# fails with "exec format error". Check the ELF itself, not the label.
+case $PLATFORM in
+    */amd64) WANT='x86-64' ;;
+    */arm64) WANT='aarch64' ;;
+    *)       WANT='' ;;
+esac
+if [ -n "$WANT" ] && command -v file >/dev/null 2>&1; then
+    CID=$(docker create --platform "$PLATFORM" "$REF" 2>/dev/null) || CID=''
+    if [ -n "$CID" ]; then
+        docker cp "$CID:/mcp-rust-demo-001" "/tmp/mcp-arch-check.$$" >/dev/null 2>&1 \
+            && ARCH_DESC=$(file -b "/tmp/mcp-arch-check.$$") \
+            || ARCH_DESC=''
+        docker rm "$CID" >/dev/null 2>&1 || true
+        rm -f "/tmp/mcp-arch-check.$$"
+        if [ -n "$ARCH_DESC" ]; then
+            case $ARCH_DESC in
+                *"$WANT"*) printf '==> binary arch ok (%s)\n' "$WANT" ;;
+                *) die "binary is not $WANT: $ARCH_DESC" ;;
+            esac
+        fi
+    fi
+fi
+
 if [ "$RUN_TEST" -eq 1 ]; then
     CNAME="mcp-smoke-$$"
     # Clean up the container however we exit, including on failure.
@@ -131,5 +156,11 @@ if [ -n "$SAVE_TO" ]; then
 fi
 
 printf '\n%s is ready.\n' "$REF"
-printf 'To load it into k3s on g1pro (sudo there prompts for a password):\n'
-printf '  docker save %s | ssh -t nickmsft@nixhome-linux-g1pro '"'"'sudo k3s ctr images import -'"'"'\n' "$REF"
+printf 'To deploy it:  scripts/deploy.sh --skip-build\n'
+# Not a single `docker save | ssh -t ...` pipeline: ssh will not allocate a TTY when
+# stdin is a pipe, and sudo on the node needs one. Stage first, then import.
+printf 'Or by hand, in two steps (the second prompts for sudo on the node):\n'
+printf '  docker save %s | ssh nickmsft@nixhome-linux-g1pro '"'"'cat > /tmp/%s.tar'"'"'\n' \
+    "$REF" "$IMAGE-$TAG"
+printf "  ssh -t nickmsft@nixhome-linux-g1pro 'sudo k3s ctr images import /tmp/%s.tar'\n" \
+    "$IMAGE-$TAG"

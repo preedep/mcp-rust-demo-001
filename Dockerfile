@@ -2,7 +2,11 @@
 # build with an explicit platform:
 #   docker buildx build --platform linux/amd64 -t mcp-rust-demo-001:dev --load .
 
-FROM --platform=$BUILDPLATFORM rust:1.97-alpine AS builder
+# No --platform here on purpose: the builder must run as the TARGET architecture so
+# cargo produces a binary for the node. Pinning it to $BUILDPLATFORM builds an ARM
+# binary on an ARM Mac and labels the image amd64, which fails on the node with
+# "exec format error".
+FROM rust:1.97-alpine AS builder
 
 # musl-dev supplies the C runtime rustc links against; the rest are build-only.
 RUN apk add --no-cache musl-dev
