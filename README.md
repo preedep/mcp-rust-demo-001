@@ -33,8 +33,16 @@ To exercise every method against a running server — local or deployed — use:
 scripts/smoke-remote.sh http://localhost:8080/mcp
 ```
 
-It runs `initialize`, `tools/list`, each tool, `ping`, a deliberate tool failure, and
-`DELETE`, printing each response.
+It prints the full request — method, URL, headers, pretty-printed body — next to each
+response and HTTP status, so any step can be lifted out and re-run by hand. Covers
+`initialize`, `tools/list`, all three tools, `ping`, a deliberate tool failure, an unknown
+method, and `DELETE`.
+
+```
+scripts/smoke-remote.sh --quiet   # responses only
+scripts/smoke-remote.sh --raw     # no pretty-printing
+scripts/smoke-remote.sh --help
+```
 
 ## Endpoints
 
