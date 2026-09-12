@@ -1,12 +1,15 @@
 use serde_json::Value;
 
-use super::ports::{SessionStore, ToolRegistry};
+use std::time::Instant;
+
+use super::ports::{Metrics, SessionStore, ToolRegistry};
 use crate::domain::{DomainError, SessionId, ToolDescriptor, ToolOutput};
 
 /// Use-cases behind the MCP methods. Knows nothing about HTTP or JSON-RPC framing.
 pub struct McpService {
     sessions: Box<dyn SessionStore>,
     tools: Box<dyn ToolRegistry>,
+    metrics: Box<dyn Metrics>,
     server_name: String,
 }
 
@@ -14,13 +17,27 @@ impl McpService {
     pub fn new(
         sessions: Box<dyn SessionStore>,
         tools: Box<dyn ToolRegistry>,
+        metrics: Box<dyn Metrics>,
         server_name: String,
     ) -> Self {
         Self {
             sessions,
             tools,
+            metrics,
             server_name,
         }
+    }
+
+    /// Record that an MCP method was handled. Called from the transport, which is
+    /// the only layer that knows the method name.
+    pub fn record_request(&self, method: &str) {
+        self.metrics.request(method);
+    }
+
+    /// Record a JSON-RPC error. Called from the transport, which is where the
+    /// error codes are decided.
+    pub fn record_rpc_error(&self, code: i32, method: &str) {
+        self.metrics.rpc_error(code, method);
     }
 
     pub fn server_name(&self) -> &str {
@@ -28,11 +45,19 @@ impl McpService {
     }
 
     pub fn initialize(&self) -> SessionId {
-        self.sessions.create()
+        let id = self.sessions.create();
+        self.metrics.session_opened();
+        self.metrics.sessions(self.sessions.count());
+        id
     }
 
     pub fn end_session(&self, id: &SessionId) -> bool {
-        self.sessions.remove(id)
+        let removed = self.sessions.remove(id);
+        if removed {
+            self.metrics.session_closed();
+        }
+        self.metrics.sessions(self.sessions.count());
+        removed
     }
 
     pub fn validate_session(&self, id: &SessionId) -> Result<(), DomainError> {
@@ -49,8 +74,25 @@ impl McpService {
 
     /// A missing tool is a protocol-level error; a tool that runs and fails reports
     /// through `ToolOutput::is_error` instead.
-    pub fn call_tool(&self, name: &str, args: &Value) -> Result<ToolOutput, DomainError> {
-        self.tools.find(name)?.invoke(args)
+    pub fn call_tool(
+        &self,
+        name: &str,
+        client_id: &str,
+        args: &Value,
+    ) -> Result<ToolOutput, DomainError> {
+        let started = Instant::now();
+        let result = self.tools.find(name).and_then(|t| t.invoke(args));
+        let elapsed = started.elapsed().as_secs_f64();
+
+        // A tool that runs and fails is an error for monitoring purposes even
+        // though it is a successful JSON-RPC response, so fold both cases in.
+        let is_error = match &result {
+            Ok(out) => out.is_error,
+            Err(_) => true,
+        };
+        self.metrics.tool_call(name, client_id, is_error, elapsed);
+
+        result
     }
 }
 
@@ -72,6 +114,9 @@ mod tests {
         }
         fn remove(&self, id: &SessionId) -> bool {
             id.as_str() == "fixed"
+        }
+        fn count(&self) -> usize {
+            1
         }
     }
 
@@ -101,6 +146,7 @@ mod tests {
         McpService::new(
             Box::new(FakeStore),
             Box::new(OneTool(vec![Box::new(Noop)])),
+            Box::new(crate::application::ports::NoMetrics),
             "test-server".into(),
         )
     }
@@ -118,9 +164,12 @@ mod tests {
     #[test]
     fn calls_known_tool_and_rejects_unknown() {
         let s = service();
-        assert_eq!(s.call_tool("noop", &json!({})).unwrap().text, "done");
         assert_eq!(
-            s.call_tool("ghost", &json!({})).unwrap_err(),
+            s.call_tool("noop", "test", &json!({})).unwrap().text,
+            "done"
+        );
+        assert_eq!(
+            s.call_tool("ghost", "test", &json!({})).unwrap_err(),
             DomainError::UnknownTool("ghost".into())
         );
     }
