@@ -2,7 +2,7 @@
 
 A demo **MCP (Model Context Protocol) server** in Rust, served over HTTP so a remote agent
 can call it as a tool provider. Built with actix-web, arranged in clean-architecture layers,
-and shipped as a 2.1 MB container image.
+and shipped as a 2.4 MB container image.
 
 Transport is **Streamable HTTP** (MCP spec `2025-03-26`): JSON-RPC 2.0 over a single
 endpoint.
@@ -79,10 +79,34 @@ The script builds the image, starts it, and verifies `/healthz`, an `initialize`
 step fails.
 
 The image is an Alpine/musl build with a `scratch` runtime — the binary is statically
-linked, so the image carries nothing else (**2.1 MB**). Note that this means **no shell**:
+linked, so the image carries nothing else (**2.4 MB**). Note that this means **no shell**:
 `docker exec`/`kubectl exec` will not work, so debug from logs or use `kubectl debug` with
 an ephemeral container. Switch the final stage to `alpine:3.21` (~5.6 MB) if you want a
 shell available.
+
+## Deploying to Kubernetes
+
+Manifests are in `k8s/`. The image is imported directly into the node's containerd rather
+than pulled from a registry, so `imagePullPolicy` is `IfNotPresent` and the tag must already
+exist on the node.
+
+```bash
+scripts/deploy.sh --dry-run   # validate manifests, change nothing
+scripts/deploy.sh             # build, import, apply, verify
+```
+
+The script builds and smoke tests the image, copies it to the node over ssh, imports it into
+containerd (this needs sudo on the node, so it prompts), applies the manifests, forces a
+rollout, and verifies the ingress route resolves and answers an MCP handshake.
+
+The image is imported in two ssh steps rather than one piped command: ssh will not allocate a
+TTY when stdin is a pipe, and sudo needs a TTY to prompt. The script stages the tarball, then
+imports it.
+
+**Building for a different architecture than your machine?** The build verifies the compiled
+binary's real ELF architecture, not just the image label — a builder stage pinned to
+`$BUILDPLATFORM` produces a host-arch binary inside an image *labelled* for the target, which
+only fails once it reaches the real hardware (`exec format error`).
 
 ## Architecture
 
@@ -95,6 +119,8 @@ src/
   domain/              Tool trait, ToolOutput, SessionId, DomainError. No framework, no I/O
   application/         use-cases (McpService) + outbound ports (SessionStore, ToolRegistry)
   infrastructure/      actix handlers, JSON-RPC framing, tool impls, in-memory store
+k8s/                   namespace, deployment, service, httproute, referencegrant
+scripts/               build-image.sh, deploy.sh
 ```
 
 Consequences worth knowing before you extend it:
@@ -120,5 +146,6 @@ stateless.
 
 ## Status
 
-The server is implemented and verified locally. It has **no TLS and no authentication** —
-add both before exposing it outside a trusted network.
+The server is implemented, verified locally, and deployed to a k3s cluster behind an Envoy
+Gateway. It has **no TLS and no authentication** — add both before exposing it
+outside a trusted network.

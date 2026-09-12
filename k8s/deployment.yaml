@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-rust-demo
+  namespace: mcp-rust-demo
+  labels:
+    app: mcp-rust-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-rust-demo
+  template:
+    metadata:
+      labels:
+        app: mcp-rust-demo
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp-rust-demo
+          image: mcp-rust-demo-001:dev
+          # The image is imported straight into containerd on the node, so never
+          # try to pull it: it exists in no registry.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BIND_ADDR
+              value: 0.0.0.0:8080
+            - name: RUST_LOG
+              value: info
+            - name: MCP_SERVER_NAME
+              value: mcp-rust-demo-001
+          # Sessions live in memory, so a restart drops them; liveness is still
+          # worth having since a wedged process cannot serve /healthz.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

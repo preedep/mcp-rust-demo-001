@@ -1,0 +1,29 @@
+# Lives in envoy-gateway (with the Gateway), not in the app namespace. The
+# cross-namespace backendRef is permitted by the ReferenceGrant below.
+#
+# /mcp is already taken on this Gateway by the airflow-mcp route, so this service
+# is published under /mcp-rust-demo and the prefix is rewritten back to /mcp.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-rust-demo
+  namespace: envoy-gateway
+spec:
+  parentRefs:
+    - name: homelab
+      namespace: envoy-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-rust-demo
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /mcp
+      backendRefs:
+        - name: mcp-rust-demo
+          namespace: mcp-rust-demo
+          port: 8080

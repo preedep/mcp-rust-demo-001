@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-rust-demo
+  namespace: mcp-rust-demo
+spec:
+  # ClusterIP only: the Envoy Gateway fronts this, so no NodePort is needed.
+  type: ClusterIP
+  selector:
+    app: mcp-rust-demo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
