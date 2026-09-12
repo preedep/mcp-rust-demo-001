@@ -171,6 +171,89 @@ in its manifest mints **v1** tokens (`https://sts.windows.net/<tenant>/`), not t
 `login.microsoftonline.com` issuer the docs suggest — and `k8s/securitypolicy.yaml` must
 match exactly, or every call fails as a bare 401 with nothing to explain it.
 
+### Connecting a Microsoft Foundry agent
+
+A Foundry agent authenticates with its own **Entra Agent Identity** — a per-agent service
+principal — so no secret is shared with it and each agent can be authorised separately.
+
+**1. Configure the connection** (Foundry → the MCP connection → Edit):
+
+| Field | Value |
+|---|---|
+| Remote MCP Server endpoint | the public HTTPS URL, e.g. `https://<machine>.<tailnet>.ts.net/mcp-rust-demo` |
+| Authentication | **Microsoft Entra** |
+| Type | **Agent Identity** |
+| Audience | the API's Application ID URI, e.g. `api://<api-client-id>` |
+
+The audience must match `spec.jwt.providers[].audiences` in `k8s/securitypolicy.yaml`
+exactly. Choose *Microsoft Entra*, not *OAuth Identity Passthrough*: passthrough represents
+the signed-in **user** and yields a `scp` claim, while the policy requires the `roles` claim
+that only an application token carries — and in a programmatic flow there is no interactive
+user to pass through anyway.
+
+**2. Find the agent's identity.** Agent → **Details** → *Identity & access* → **Entra agent
+identity**, and copy the full ID. Use the *agent identity*, not the *agent blueprint*: the
+blueprint is the template it was created from and never authenticates.
+
+**3. Grant it the app role.** The portal cannot assign app roles to an agent identity, so use
+Graph. Each agent needs its own assignment:
+
+```bash
+az login --tenant <tenant-id>
+
+AGENT_ID=<entra agent identity id>
+API_APP_ID=<api registration client id>
+
+AGENT_OID=$(az ad sp show --id "$AGENT_ID" --query id -o tsv 2>/dev/null \
+  || az ad sp list --filter "appId eq '$AGENT_ID'" --query '[0].id' -o tsv)
+API_SP=$(az ad sp list --filter "appId eq '$API_APP_ID'" --query '[0].id' -o tsv)
+ROLE_ID=$(az ad app show --id "$API_APP_ID" \
+  --query "appRoles[?value=='mcp.invoke'].id | [0]" -o tsv)
+
+az rest --method POST \
+  --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$AGENT_OID/appRoleAssignments" \
+  --body "{\"principalId\":\"$AGENT_OID\",\"resourceId\":\"$API_SP\",\"appRoleId\":\"$ROLE_ID\"}"
+```
+
+A `201` with `principalDisplayName` naming your agent means it worked. Entra caches tokens
+for a few minutes, so allow a short delay before retrying.
+
+**4. Verify** by asking the agent what tools it has. A healthy session looks like this in the
+gateway's access log — handshake, SSE stream, notification, listing, teardown:
+
+```
+POST   200  via_upstream                  initialize
+GET    200  downstream_remote_disconnect  SSE stream
+POST   202  via_upstream                  notifications/initialized
+POST   200  via_upstream                  tools/list
+DELETE 204  via_upstream                  session closed
+```
+
+#### Reading a failure
+
+The status code says which half of the check failed, which narrows it immediately:
+
+| Result | Meaning |
+|---|---|
+| **401**, `Jwt is missing` | No token sent — the connection is not set to Microsoft Entra |
+| **401**, `Jwt verification fails` | Issuer or JWKS mismatch (see the v1/v2 note above) |
+| **401**, audience not allowed | The Audience field does not match the policy |
+| **403**, `rbac_access_denied_matched_policy[DENY]` | **Token is valid**; the principal lacks `mcp.invoke` — do step 3 |
+
+A 403 is good news: it means signature, issuer and audience all passed, and only the role
+assignment is missing. Read the log with:
+
+```bash
+kubectl -n envoy-gateway-system logs deploy/envoy-<gateway> | grep AzureAIFoundryAgentRuntime
+```
+
+#### Per-agent authorisation
+
+Because the identity is per agent, a second agent gets a 403 until it is granted the role
+too. That is the access-control model working as intended rather than an obstacle: define
+narrower roles (`mcp.read` alongside `mcp.invoke`, say) and assign each agent only what it
+needs, and the gateway enforces the split without the server changing.
+
 ### Switching back to a static key
 
 `k8s/securitypolicy-apikey.yaml` is the previous key-based policy, kept as a rollback. Both
@@ -221,7 +304,9 @@ only fails once it reaches the real hardware (`exec format error`).
 ## Using it from an agent
 
 Point any MCP client at your deployment's endpoint with transport type `http`. The scripts
-read it from `MCP_URL` in `.env`; this repo deliberately does not record a live endpoint. For Microsoft Foundry,
+read it from `MCP_URL` in `.env`; this repo deliberately does not record a live endpoint. For
+a Microsoft Foundry agent, see **Connecting a Microsoft Foundry agent** above — it
+authenticates with its own Entra Agent Identity rather than a shared credential. For Microsoft Foundry,
 create a connection with `Key-based` authentication, header `Authorization`, and the value
 from `scripts/apply-auth.sh --show`.
 
@@ -575,10 +660,10 @@ The public tunnel is scoped to this service's path alone, so nothing else on the
 gateway is reachable from the internet.
 
 Callers authenticate with a short-lived Entra token carrying the `mcp.invoke` app role, so
-there is no shared secret at rest and revocation happens at the identity provider. There is
-still no rate limiting or per-tool authorisation — see the access-control sketch below.
+there is no shared secret at rest and revocation happens at the identity provider. A
+Microsoft Foundry agent connects with its own per-agent Entra Agent Identity, verified end to
+end.
 
-Note that a Microsoft Foundry agent cannot currently reach this endpoint: its MCP connection
-sends a static credential, and the gateway enforces one auth method at a time. Apply
-`k8s/securitypolicy-apikey.yaml` to switch back to the static key if the agent path matters
-more than workload identity.
+There is still no rate limiting and no per-tool authorisation — every caller holding
+`mcp.invoke` can invoke every tool. See the access-control sketch below for where per-tool
+rules would go.
