@@ -7,8 +7,11 @@ use super::jsonrpc::{
 };
 use crate::application::McpService;
 use crate::domain::SessionId;
+use crate::infrastructure::PrometheusMetrics;
 
 const SESSION_HEADER: &str = "Mcp-Session-Id";
+/// Set by the gateway from the verified token; absent when running without one.
+const CLIENT_ID_HEADER: &str = "X-Client-Id";
 
 type Service = web::Data<McpService>;
 
@@ -17,25 +20,40 @@ async fn healthz() -> impl Responder {
     HttpResponse::Ok().content_type("text/plain").body("ok")
 }
 
+/// Prometheus scrape target. Deliberately NOT published through the gateway: it is
+/// reachable on the ClusterIP service only, so it needs no credential and never
+/// leaves the cluster.
+#[get("/metrics")]
+async fn metrics(exporter: web::Data<std::sync::Arc<PrometheusMetrics>>) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(exporter.encode())
+}
+
 #[post("/mcp")]
 async fn mcp_post(req: HttpRequest, body: web::Bytes, svc: Service) -> HttpResponse {
     let parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            return HttpResponse::Ok().json(Response::error(
+            // The body never parsed, so there is no method name to attribute it to.
+            return HttpResponse::Ok().json(rpc_err(
+                &svc,
                 Value::Null,
                 code::PARSE_ERROR,
+                "unparsed",
                 e.to_string(),
-            ))
+            ));
         }
     };
 
     // A batch is a JSON array; handle it before reading a single envelope.
     if let Some(items) = parsed.as_array() {
         if items.is_empty() {
-            return HttpResponse::Ok().json(Response::error(
+            return HttpResponse::Ok().json(rpc_err(
+                &svc,
                 Value::Null,
                 code::INVALID_REQUEST,
+                "batch",
                 "empty batch",
             ));
         }
@@ -97,9 +115,15 @@ fn dispatch(http: &HttpRequest, raw: &Value, svc: &McpService) -> Option<Dispatc
         Ok(r) => r,
         Err(e) => {
             let id = raw.get("id").cloned().unwrap_or(Value::Null);
-            return Some(plain(Response::error(
+            let method = raw
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("unparsed");
+            return Some(plain(rpc_err(
+                svc,
                 id,
                 code::INVALID_REQUEST,
+                method,
                 e.to_string(),
             )));
         }
@@ -107,9 +131,11 @@ fn dispatch(http: &HttpRequest, raw: &Value, svc: &McpService) -> Option<Dispatc
 
     if req.jsonrpc != "2.0" {
         let id = req.id.clone().unwrap_or(Value::Null);
-        return Some(plain(Response::error(
+        return Some(plain(rpc_err(
+            svc,
             id,
             code::INVALID_REQUEST,
+            &req.method,
             "jsonrpc must be \"2.0\"",
         )));
     }
@@ -120,6 +146,7 @@ fn dispatch(http: &HttpRequest, raw: &Value, svc: &McpService) -> Option<Dispatc
 
     let id = req.id.clone().unwrap_or(Value::Null);
     let params = req.params.clone().unwrap_or(Value::Null);
+    svc.record_request(&req.method);
 
     match req.method.as_str() {
         "initialize" => {
@@ -139,7 +166,7 @@ fn dispatch(http: &HttpRequest, raw: &Value, svc: &McpService) -> Option<Dispatc
         }
         "ping" => Some(plain(Response::result(id, json!({})))),
         "tools/list" => Some(plain(match guard_session(http, svc) {
-            Err(e) => Response::error(id, error_code_for(&e), e.to_string()),
+            Err(e) => rpc_err(svc, id, error_code_for(&e), "tools/list", e.to_string()),
             Ok(()) => {
                 let tools: Vec<Value> = svc
                     .list_tools()
@@ -150,29 +177,45 @@ fn dispatch(http: &HttpRequest, raw: &Value, svc: &McpService) -> Option<Dispatc
             }
         })),
         "tools/call" => Some(plain(call_tool(http, svc, id, &params))),
-        other => Some(plain(Response::error(
+        other => Some(plain(rpc_err(
+            svc,
             id,
             code::METHOD_NOT_FOUND,
+            other,
             format!("unknown method '{other}'"),
         ))),
     }
 }
 
+fn client_id(req: &HttpRequest) -> String {
+    req.headers()
+        .get(CLIENT_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
 fn call_tool(http: &HttpRequest, svc: &McpService, id: Value, params: &Value) -> Response {
     if let Err(e) = guard_session(http, svc) {
-        return Response::error(id, error_code_for(&e), e.to_string());
+        return rpc_err(svc, id, error_code_for(&e), "tools/call", e.to_string());
     }
     let Some(name) = params.get("name").and_then(Value::as_str) else {
-        return Response::error(id, code::INVALID_PARAMS, "missing 'name'");
+        return rpc_err(
+            svc,
+            id,
+            code::INVALID_PARAMS,
+            "tools/call",
+            "missing 'name'",
+        );
     };
     let args = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    match svc.call_tool(name, &args) {
+    match svc.call_tool(name, &client_id(http), &args) {
         Ok(out) => Response::result(id, tool_output_to_json(&out)),
-        Err(e) => Response::error(id, error_code_for(&e), e.to_string()),
+        Err(e) => rpc_err(svc, id, error_code_for(&e), "tools/call", e.to_string()),
     }
 }
 
@@ -190,6 +233,19 @@ fn guard_session(req: &HttpRequest, svc: &McpService) -> Result<(), crate::domai
         Some(id) => svc.validate_session(&id),
         None => Ok(()),
     }
+}
+
+/// Build an error response and count it. Every JSON-RPC error goes through here,
+/// so the counter cannot drift from what is actually returned.
+fn rpc_err(
+    svc: &McpService,
+    id: Value,
+    code: i32,
+    method: &str,
+    message: impl Into<String>,
+) -> Response {
+    svc.record_rpc_error(code, method);
+    Response::error(id, code, message)
 }
 
 fn plain(body: Response) -> Dispatched {
@@ -211,6 +267,7 @@ fn keepalive_stream() -> impl futures_core::Stream<Item = Result<web::Bytes, act
 
 pub fn configure(c: &mut web::ServiceConfig) {
     c.service(healthz)
+        .service(metrics)
         .service(mcp_post)
         .service(mcp_get)
         .service(mcp_delete);

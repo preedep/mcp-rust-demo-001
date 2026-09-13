@@ -318,6 +318,114 @@ rejects everything — including credentials that worked a moment earlier. Verif
 2026-09-12: key-only works, JWT-only works, both together returns 401 for each. Confirm
 every caller can present a token before cutting over.
 
+## Monitoring
+
+The server exposes Prometheus metrics on `GET /metrics`, served on the app port but
+**deliberately not routed through the gateway** — it is reachable on the ClusterIP service
+only, so scraping needs no credential and the endpoint never leaves the cluster. The pod
+carries `prometheus.io/scrape` annotations for discovery.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `mcp_tool_calls_total` | counter | `tool`, `client_id`, `is_error` |
+| `mcp_tool_duration_seconds` | histogram | `tool` |
+| `mcp_requests_total` | counter | `method` |
+| `mcp_rpc_errors_total` | counter | `code`, `method` |
+| `mcp_sessions_active` | gauge | — |
+| `mcp_sessions_created_total` | counter | — |
+| `mcp_sessions_closed_total` | counter | — |
+
+`mcp_rpc_errors_total` is the one the gateway cannot provide. A JSON-RPC error is a
+*successful* HTTP response — parse failures, unknown methods and bad params all leave as
+200 — so without this a client sending malformed requests is invisible. Every error
+response is built through one helper that counts it, so the counter cannot drift from what
+is actually returned.
+
+The session counters exist because the gauge alone cannot reveal a slow leak: a growing gap
+between `created` and `closed` means clients are not sending `DELETE`.
+
+`method` is bucketed to the methods this server implements, with everything else collapsing
+to `other`. The method name comes from the caller, so recording it verbatim would let anyone
+inflate the series count by inventing names.
+
+`client_id` comes from the `X-Client-Id` header the gateway derives from the verified token,
+so tool usage is attributed per calling agent without the server parsing anything. It falls
+back to `unknown` when the header is absent, which is what happens when the server is reached
+directly rather than through the gateway.
+
+`is_error` folds together both failure modes: a tool that ran and failed (returning
+`isError: true`) and a tool that could not be found. For monitoring, both are failed
+invocations.
+
+```bash
+kubectl -n mcp-rust-demo port-forward deploy/mcp-rust-demo 8080:8080
+curl -s localhost:8080/metrics | grep mcp_
+```
+
+**Envoy covers the transport layer.** It records status codes, latency and request rate per
+route — which is where the 401 (bad token) versus 403 (valid token, missing app role) split
+shows up. What it cannot see is MCP method or tool names: every call is `POST /mcp` with the
+detail in the JSON body, which is exactly the gap these metrics fill.
+
+Cardinality note: `client_id` is unbounded in principle. That is fine with a handful of
+agents, but worth watching if agents ever churn rapidly.
+
+### What to watch, and what is wrong when you see it
+
+The four layers fail differently, and the layer that reports a problem tells you where to
+look. Roughly in the order they matter:
+
+| Signal | Source | What it means |
+|---|---|---|
+| `up` for the scrape target is 0 | Prometheus | The server is unreachable — everything below is stale |
+| Envoy healthy upstreams is 0 while the pod runs | Envoy | The gateway cannot route; the server is fine |
+| Pod restarts climbing | kube-state-metrics | Crash loop. Memory limit is 64Mi, so check for OOMKill first |
+| 401 rate above zero | Envoy | Token rejected: signature, issuer or audience. A config fault |
+| 403 rate above zero | Envoy | Token valid, principal lacks `mcp.invoke`. A missing role assignment |
+| `mcp_rpc_errors_total{code="-32700"}` rising | server | Callers sending malformed JSON |
+| `mcp_rpc_errors_total{code="-32601"}` rising | server | A client calling a method or tool that does not exist — usually a version skew |
+| `mcp_tool_calls_total{is_error="true"}` ratio rising | server | Tools are running but failing. Check per-`tool` to see which |
+| `created - closed` widening | server | Session leak: clients are not sending `DELETE` |
+| `mcp_tool_duration_seconds` p99 climbing | server | A tool got slow. Today everything is sub-millisecond |
+
+Two of these are invisible without the server's own metrics, which is the reason it exposes
+any:
+
+- **JSON-RPC errors return HTTP 200.** A client sending nothing but malformed requests looks
+  perfectly healthy at the transport layer. Only `mcp_rpc_errors_total` shows it.
+- **Tool failures are successful responses too.** A tool that returns `isError: true` is a
+  correct MCP response, so Envoy sees 200. Only `mcp_tool_calls_total{is_error="true"}` shows
+  it.
+
+Useful starting queries:
+
+```promql
+# share of MCP calls returning a protocol error
+sum(rate(mcp_rpc_errors_total[$__rate_interval]))
+  / sum(rate(mcp_requests_total[$__rate_interval]))
+
+# tool failure rate, per tool
+sum by (tool) (rate(mcp_tool_calls_total{is_error="true"}[$__rate_interval]))
+  / sum by (tool) (rate(mcp_tool_calls_total[$__rate_interval]))
+
+# sessions opened but never closed
+mcp_sessions_created_total - mcp_sessions_closed_total
+
+# p99 tool latency
+histogram_quantile(0.99,
+  sum by (le, tool) (rate(mcp_tool_duration_seconds_bucket[$__rate_interval])))
+
+# per-agent tool usage
+sum by (client_id, tool) (rate(mcp_tool_calls_total[$__rate_interval]))
+```
+
+Note `is_error` is a **string** label, so it needs quoting: `{is_error="true"}`. Writing it
+unquoted yields an empty series rather than an error, which is an easy panel to leave
+silently broken.
+
+Sessions live in memory, so `mcp_sessions_active` resets to 0 on a pod restart. A sudden drop
+there is a restart, not a client disconnecting.
+
 ## Deploying to Kubernetes
 
 Manifests are in `k8s/`. The image is imported directly into the node's containerd rather

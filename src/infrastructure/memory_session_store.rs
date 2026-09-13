@@ -34,4 +34,8 @@ impl SessionStore for MemorySessionStore {
     fn remove(&self, id: &SessionId) -> bool {
         self.lock().remove(id.as_str())
     }
+
+    fn count(&self) -> usize {
+        self.lock().len()
+    }
 }
